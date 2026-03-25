@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -7,15 +7,13 @@ import dotenv from "dotenv";
 import { transactionRoutes } from "./routes/transactions";
 import { bulkRoutes } from "./routes/bulk";
 import { transactionDisputeRoutes, disputeRoutes } from "./routes/disputes";
+import { statsRoutes } from "./routes/stats";
 import { errorHandler } from "./middleware/errorHandler";
 import { connectRedis, redisClient } from "./config/redis";
 import { pool } from "./config/database";
-import {
-  globalTimeout,
-  haltOnTimedout,
-  timeoutErrorHandler,
-} from "./middleware/timeout";
+import { globalTimeout, haltOnTimedout, timeoutErrorHandler } from "./middleware/timeout";
 import { responseTime } from "./middleware/responseTime";
+import { createQueueDashboard, getQueueHealth, pauseQueueEndpoint, resumeQueueEndpoint } from "./queue";
 import {
   createQueueDashboard,
   getQueueHealth,
@@ -34,33 +32,48 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Rate limiter configuration
-const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'); // 15 minutes
-const RATE_LIMIT_MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100');
+const RATE_LIMIT_WINDOW_MS = parseInt(
+  process.env.RATE_LIMIT_WINDOW_MS || "900000",
+); // 15 minutes
+const RATE_LIMIT_MAX_REQUESTS = parseInt(
+  process.env.RATE_LIMIT_MAX_REQUESTS || "100",
+);
 
 const limiter = rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
   windowMs: RATE_LIMIT_WINDOW_MS,
+  windowMs: RATE_LIMIT_WINDOW_MS, // 15 minutes
   max: RATE_LIMIT_MAX_REQUESTS,
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 // Middleware
-app.use(metricsMiddleware); // Register metrics middleware early
+app.use(metricsMiddleware);
 app.use(helmet());
 app.use(cors());
-app.use(express.json());
+
+// --- Updated: JSON body parser with size limit ---
+app.use(
+  express.json({
+    limit: process.env.REQUEST_SIZE_LIMIT || "10mb", // Default 10mb
+  })
+);
+
+// --- Optional: urlencoded parser with same limit ---
+app.use(
+  express.urlencoded({
+    limit: process.env.REQUEST_SIZE_LIMIT || "10mb",
+    extended: true,
+  })
+);
+
 app.use(limiter);
 app.use(responseTime);
 
-// Prometheus metrics endpoint
-app.get("/metrics", async (req, res) => {
-  try {
-    res.set("Content-Type", register.contentType);
-    res.end(await register.metrics());
-  } catch (err) {
-    res.status(500).end(err);
-  }
-});
+// Health & readiness
+app.get("/health", (req, res) => res.json({ status: "ok", timestamp: new Date().toISOString() }));
 
 // Basic health check
 app.get("/health", (req, res) => {
@@ -70,12 +83,9 @@ app.get("/health", (req, res) => {
 /**
  * Readiness probe (DB + Redis)
  */
-app.get("/ready", async (req, res) => {
-  const checks: Record<string, string> = {
-    database: "down",
-    redis: "down",
-  };
 
+app.get("/ready", async (req, res) => {
+  const checks: Record<string, string> = { database: "down", redis: "down" };
   let allReady = true;
 
   try {
@@ -83,7 +93,6 @@ app.get("/ready", async (req, res) => {
     checks.database = "ok";
   } catch (err) {
     console.error("Database check failed", err);
-    checks.database = "error";
     allReady = false;
   }
 
@@ -97,17 +106,14 @@ app.get("/ready", async (req, res) => {
     }
   } catch (err) {
     console.error("Redis check failed", err);
-    checks.redis = "error";
     allReady = false;
   }
 
-  const response = {
+  res.status(allReady ? 200 : 503).json({
     status: allReady ? "ready" : "not ready",
     checks,
     timestamp: new Date().toISOString(),
-  };
-
-  res.status(allReady ? 200 : 503).json(response);
+  });
 });
 
 // Timeout middleware
@@ -119,33 +125,45 @@ app.use("/api/transactions", transactionRoutes);
 app.use("/api/transactions", transactionDisputeRoutes);
 app.use("/api/transactions/bulk", bulkRoutes);
 app.use("/api/disputes", disputeRoutes);
+app.use("/api/stats", statsRoutes);
 
-// Queue health check
+// Queue endpoints
 app.get("/health/queue", getQueueHealth);
 app.post("/admin/queues/pause", pauseQueueEndpoint);
 app.post("/admin/queues/resume", resumeQueueEndpoint);
 
-// Timeout error handler (must be before general error handler)
+// --- NEW: Global handler for payload too large ---
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({
+      error: "Payload Too Large",
+      message: `Request exceeds the maximum size of ${process.env.REQUEST_SIZE_LIMIT || "10mb"}`,
+    });
+  }
+  next(err);
+});
+
+// Error handlers
 app.use(timeoutErrorHandler);
 app.use(errorHandler);
 
-// Init Redis
+// Redis init
 connectRedis()
-  .then(() => {
-    console.log("Redis initialized");
-  })
+  .then(() => console.log("Redis initialized"))
   .catch((err) => {
-    console.error("Failed to connect to Redis:", err);
-    console.warn("Distributed locks will not be available");
+    console.error("Redis failed", err);
+    console.warn("Distributed locks not available");
   });
 
-// Initialize queue dashboard
+// Queue dashboard
 const queueRouter = createQueueDashboard();
 app.use("/admin/queues", queueRouter);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Rate limit: ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`);
+  console.log(
+    `Rate limit: ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`,
+  );
 });
 
 export default app;

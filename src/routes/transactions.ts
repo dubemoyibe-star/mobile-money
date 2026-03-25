@@ -3,23 +3,29 @@ import {
   depositHandler,
   withdrawHandler,
   getTransactionHandler,
+  updateNotesHandler,
+  searchTransactionsHandler,
 } from "../controllers/transactionController";
 import { TimeoutPresets, haltOnTimedout } from "../middleware/timeout";
 
 export const transactionRoutes = Router();
 
-// Deposit and withdraw operations may take longer due to external API calls
+// Deposit route
 transactionRoutes.post(
   "/deposit",
   TimeoutPresets.long,
   haltOnTimedout,
-  depositHandler,
+  validateTransaction,
+  depositHandler
 );
+
+// Withdraw route
 transactionRoutes.post(
   "/withdraw",
   TimeoutPresets.long,
   haltOnTimedout,
-  withdrawHandler,
+  validateTransaction,
+  withdrawHandler
 );
 
 // Quick read operation
@@ -28,4 +34,19 @@ transactionRoutes.get(
   TimeoutPresets.quick,
   haltOnTimedout,
   getTransactionHandler,
+);
+
+// Notes and search
+transactionRoutes.patch(
+  "/:id/notes",
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  updateNotesHandler,
+);
+
+transactionRoutes.get(
+  "/search",
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  searchTransactionsHandler,
 );
