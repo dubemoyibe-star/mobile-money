@@ -8,7 +8,7 @@ import { errorHandler } from './middleware/errorHandler';
 import { connectRedis } from './config/redis';
 import { globalTimeout, haltOnTimedout, timeoutErrorHandler } from './middleware/timeout';
 import { responseTime } from './middleware/responseTime';
-import { createQueueDashboard, startJobs } from './queue';
+import { createQueueDashboard } from './queue';
 
 dotenv.config();
 
@@ -55,7 +55,6 @@ connectRedis()
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  startJobs();
 });
 
 export default app;
