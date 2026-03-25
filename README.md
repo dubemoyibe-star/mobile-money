@@ -107,9 +107,9 @@ The system enforces daily transaction limits based on user KYC (Know Your Custom
 
 Before checking daily KYC limits, the system validates that each individual transaction falls within acceptable ranges:
 
-| Limit Type | Amount  | Purpose                                      |
-| ---------- | ------- | -------------------------------------------- |
-| Minimum    | 100 XAF | Prevents micro-transactions and spam         |
+| Limit Type | Amount        | Purpose                                        |
+| ---------- | ------------- | ---------------------------------------------- |
+| Minimum    | 100 XAF       | Prevents micro-transactions and spam           |
 | Maximum    | 1,000,000 XAF | Fraud prevention for single large transactions |
 
 These limits can be configured via environment variables:
@@ -160,6 +160,50 @@ If not specified, the system uses the default values shown above.
 - Higher limits enable larger transactions and better support for business use cases
 
 When a transaction is rejected due to limit exceeded, the error response includes your current KYC level, remaining limit, and upgrade suggestions.
+
+## Provider-Specific Transaction Limits
+
+Different mobile money providers have different capabilities and risk profiles. The system enforces provider-specific transaction limits before checking KYC limits.
+
+### Default Limits
+
+| Provider | Minimum | Maximum       | Description                                     |
+| -------- | ------- | ------------- | ----------------------------------------------- |
+| MTN      | 100 XAF | 500,000 XAF   | Most common mobile money provider               |
+| Airtel   | 100 XAF | 1,000,000 XAF | Higher maximum for larger transactions          |
+| Orange   | 500 XAF | 750,000 XAF   | Slightly higher minimum due to network policies |
+
+### How Provider Limits Work
+
+1. **First Validation**: Each transaction is first checked against provider-specific min/max limits
+2. **Provider Detection**: The provider is determined from the transaction request (mtn, airtel, orange)
+3. **Clear Error Messages**: If rejected, the error includes the allowed range for that provider
+
+Example error message:
+
+```
+Amount 600 XAF is below the minimum of 500 XAF for ORANGE. Allowed range: 500 - 750000 XAF
+```
+
+### Configuration
+
+Provider limits can be customized via environment variables:
+
+```bash
+# MTN limits
+MTN_MIN_AMOUNT=100
+MTN_MAX_AMOUNT=500000
+
+# Airtel limits
+AIRTEL_MIN_AMOUNT=100
+AIRTEL_MAX_AMOUNT=1000000
+
+# Orange limits
+ORANGE_MIN_AMOUNT=500
+ORANGE_MAX_AMOUNT=750000
+```
+
+If not specified, the system uses the default values shown above.
 
 ## Git Hooks
 
@@ -227,22 +271,24 @@ src/
 ## API Documentation Updates
 
 ### Transaction History
+
 **Endpoint:** `GET /api/transactions`
 
 Allows users to view their transaction history with built-in pagination and date-range filtering.
 
 **Query Parameters:**
-| Parameter   | Type   | Description |
+| Parameter | Type | Description |
 | :---------- | :----- | :---------- |
 | `startDate` | string | ISO 8601 format (e.g., 2026-03-01). |
-| `endDate`   | string | ISO 8601 format (e.g., 2026-03-31). |
-| `page`      | number | The page number to retrieve (Default: 1). |
-| `limit`     | number | Number of transactions per page (Default: 10). |
+| `endDate` | string | ISO 8601 format (e.g., 2026-03-31). |
+| `page` | number | The page number to retrieve (Default: 1). |
+| `limit` | number | Number of transactions per page (Default: 10). |
 
 **Example Request:**
 `GET /api/transactions?startDate=2026-03-01&endDate=2026-03-31&page=1&limit=5`
 
 **Validation Rules:**
+
 - Returns `400 Bad Request` if the date format is not ISO 8601.
 - Returns `400 Bad Request` if `startDate` is a later date than `endDate`.
 
