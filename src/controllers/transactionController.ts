@@ -1,16 +1,11 @@
 import { Request, Response } from 'express';
 import { StellarService } from '../services/stellar/stellarService';
 import { MobileMoneyService } from '../services/mobilemoney/mobileMoneyService';
-import { TransactionModel } from '../models/transaction';
+import { TransactionModel, TransactionStatus } from '../models/transaction';
 import { lockManager, LockKeys } from '../utils/lock';
 import { TransactionLimitService } from '../services/transactionLimit/transactionLimitService';
 import { KYCService } from '../services/kyc/kycService';
-import { Request, Response } from "express";
-import { StellarService } from "../services/stellar/stellarService";
-import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
-import { TransactionModel, TransactionStatus } from "../models/transaction";
-import { lockManager, LockKeys } from "../utils/lock";
-import { addTransactionJob, getJobProgress } from "../queue";
+import { addTransactionJob, getJobProgress } from '../queue';
 
 const stellarService = new StellarService();
 const mobileMoneyService = new MobileMoneyService();
@@ -43,8 +38,6 @@ export const depositHandler = async (req: Request, res: Response) => {
     }
     
     // Use distributed lock to prevent duplicate transactions from same phone number
-    const { amount, phoneNumber, provider, stellarAddress } = req.body;
-
     const result = await lockManager.withLock(
       LockKeys.phoneNumber(phoneNumber),
       async () => {
@@ -116,35 +109,52 @@ export const withdrawHandler = async (req: Request, res: Response) => {
         }
       });
     }
-    
-    const { amount, phoneNumber, provider, stellarAddress } = req.body;
 
-    const transaction = await transactionModel.create({
-      type: "withdraw",
-      amount,
-      phoneNumber,
-      provider,
-      stellarAddress,
-      status: TransactionStatus.Pending,
-      tags: [],
-    });
+    // Use distributed lock to prevent duplicate transactions from same phone number
+    const result = await lockManager.withLock(
+      LockKeys.phoneNumber(phoneNumber),
+      async () => {
+        const transaction = await transactionModel.create({
+          type: "withdraw",
+          amount,
+          phoneNumber,
+          provider,
+          stellarAddress,
+          status: TransactionStatus.Pending,
+          tags: [],
+        });
 
-    const job = await addTransactionJob({
-      transactionId: transaction.id,
-      type: "withdraw",
-      amount,
-      phoneNumber,
-      provider,
-      stellarAddress,
-    });
+        const job = await addTransactionJob({
+          transactionId: transaction.id,
+          type: "withdraw",
+          amount,
+          phoneNumber,
+          provider,
+          stellarAddress,
+        });
 
-    res.json({
-      transactionId: transaction.id,
-      referenceNumber: transaction.referenceNumber,
-      status: TransactionStatus.Pending,
-      jobId: job.id,
-    });
+        return {
+          transactionId: transaction.id,
+          referenceNumber: transaction.referenceNumber,
+          status: TransactionStatus.Pending,
+          jobId: job.id,
+        };
+      },
+      15000,
+    );
+
+    res.json(result);
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("Unable to acquire lock")
+    ) {
+      return res
+        .status(409)
+        .json({
+          error: "Transaction already in progress for this phone number",
+        });
+    }
     res.status(500).json({ error: "Transaction failed" });
   }
 };
