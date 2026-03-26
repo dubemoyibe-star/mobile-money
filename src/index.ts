@@ -3,7 +3,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-
+import stellarRoutes from "./routes/stellar";
 import { transactionRoutes } from "./routes/transactions";
 import { bulkRoutes } from "./routes/bulk";
 import { transactionDisputeRoutes, disputeRoutes } from "./routes/disputes";
@@ -68,6 +68,9 @@ app.use(
 );
 app.use(limiter);
 app.use(responseTime);
+
+
+app.use("/api/stellar", stellarRoutes);
 
 // Health & readiness
 app.get("/health", (req, res) =>
