@@ -1,22 +1,27 @@
-import { Request, Response } from "express";
+import { NextFunction, Request, Response } from "express";
+import { z } from "zod";
+import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
-import { TransactionModel, TransactionStatus } from "../models/transaction";
-import { pool } from "../config/database";
+import { Transaction, TransactionModel, TransactionStatus } from "../models/transaction";
 import { lockManager, LockKeys } from "../utils/lock";
 import { TransactionLimitService } from "../services/transactionLimit/transactionLimitService";
 import { KYCService } from "../services/kyc/kycService";
-import { addTransactionJob, getJobProgress } from "../queue";
 import { MobileMoneyProvider, validateProviderLimits } from "../config/providers";
 import {
-  TransactionResponse,
-  TransactionDetailResponse,
+import type { TransactionJobData } from "../queue/transactionQueue";
   CancelTransactionResponse,
   LimitExceededErrorResponse,
+  PhoneSearchResponse,
+  TransactionDetailResponse,
+  TransactionResponse,
 } from "../types/api";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
 );
+
+type TransactionRequestType = "deposit" | "withdraw";
+type CreateTransactionResponse = TransactionResponse;
 
 // Initialized for upcoming transaction execution work.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -30,7 +35,24 @@ const transactionLimitService = new TransactionLimitService(
   transactionModel,
 );
 
-// ------------------ Validation Middleware ------------------
+async function addTransactionJob(
+  data: TransactionJobData,
+  options?: {
+    priority?: number;
+    delay?: number;
+    repeat?: { every: number };
+    jobId?: string;
+  },
+) {
+  const queue = await import("../queue/transactionQueue");
+  return queue.addTransactionJob(data, options);
+}
+
+async function getJobProgress(jobId: string) {
+  const queue = await import("../queue/transactionQueue");
+  return queue.getJobProgress(jobId);
+}
+
 export const transactionSchema = z.object({
   amount: z.number().positive({ message: "Amount must be a positive number" }),
   phoneNumber: z
@@ -60,20 +82,20 @@ export const validateTransaction = (
   }
 };
 
-// ------------------ New History Handler (Issue #21) ------------------
-
-export const getTransactionHistoryHandler = async (req: Request, res: Response) => {
+export const getTransactionHistoryHandler = async (
+  req: Request,
+  res: Response,
+) => {
   try {
     const { startDate, endDate, offset = "0", limit = "20" } = req.query;
 
-    // 1. Validate ISO 8601 Format
-    const isValidISO = (dateStr: any) => {
+    const isValidISO = (dateStr: unknown) => {
       if (!dateStr) return true;
-      // Strict YYYY-MM-DD check
-      const regex = /^\d{4}-\d{2}-\d{2}$/;
-      if (!regex.test(dateStr)) return false;
-      const d = new Date(dateStr as string);
-      return !isNaN(d.getTime());
+      if (typeof dateStr !== "string") return false;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return false;
+
+      const d = new Date(`${dateStr}T00:00:00.000Z`);
+      return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(dateStr);
     };
 
     if (!isValidISO(startDate) || !isValidISO(endDate)) {
@@ -82,7 +104,6 @@ export const getTransactionHistoryHandler = async (req: Request, res: Response) 
       });
     }
 
-    // 2. Validate Date Logic
     if (
       startDate &&
       endDate &&
@@ -93,22 +114,23 @@ export const getTransactionHistoryHandler = async (req: Request, res: Response) 
         .json({ error: "startDate cannot be greater than endDate" });
     }
 
-    // 3. Prepare Pagination
     const limitNum = Math.max(1, Math.min(100, parseInt(limit as string) || 20));
     const offsetNum = Math.max(0, parseInt(offset as string) || 0);
 
-    // 4. Fetch Data using Model
     const [transactions, total] = await Promise.all([
       transactionModel.list(
         limitNum,
         offsetNum,
-        startDate as string,
-        endDate as string,
+        startDate as string | undefined,
+        endDate as string | undefined,
       ),
-      transactionModel.count(startDate as string, endDate as string),
+      transactionModel.count(
+        startDate as string | undefined,
+        endDate as string | undefined,
+      ),
     ]);
 
-    res.json({
+    return res.json({
       data: transactions,
       pagination: {
         total,
@@ -119,9 +141,29 @@ export const getTransactionHistoryHandler = async (req: Request, res: Response) 
     });
   } catch (error) {
     console.error("History Fetch Error:", error);
-    res
+    return res
       .status(500)
       .json({ error: "Failed to fetch transaction history from database" });
+  }
+};
+
+function getRequestAmount(amount: unknown): number {
+  if (typeof amount === "number") {
+    return amount;
+  }
+
+  if (typeof amount === "string") {
+    return parseFloat(amount);
+  }
+
+  return Number.NaN;
+}
+
+function getIdempotencyKey(req: Request): string | null {
+  const key = req.header("Idempotency-Key")?.trim();
+
+  if (!key) {
+    return null;
   }
 
   if (key.length > 255) {
@@ -192,7 +234,7 @@ async function processTransactionRequest(
     );
 
     if (!limitCheck.allowed) {
-      return res.status(400).json({
+      const body: LimitExceededErrorResponse = {
         error: "Transaction limit exceeded",
         details: {
           kycLevel: limitCheck.kycLevel,
@@ -202,7 +244,9 @@ async function processTransactionRequest(
           message: limitCheck.message,
           upgradeAvailable: limitCheck.upgradeAvailable,
         },
-      });
+      };
+
+      return res.status(400).json(body);
     }
 
     const createOrReuse = async (): Promise<CreateTransactionResponse> => {
@@ -294,7 +338,10 @@ async function processTransactionRequest(
       return res.status(400).json({ error: error.message });
     }
 
-    if (error instanceof Error && error.message.includes("Unable to acquire lock")) {
+    if (
+      error instanceof Error &&
+      error.message.includes("Unable to acquire lock")
+    ) {
       return res.status(409).json({
         error: "Transaction already in progress for this resource",
       });
@@ -338,15 +385,23 @@ export const getTransactionHandler = async (req: Request, res: Response) => {
       if (diffMinutes > timeoutMinutes) {
         await transactionModel.updateStatus(id, TransactionStatus.Failed);
         transaction.status = TransactionStatus.Failed;
-        return res.json({
+
+        const body: TransactionDetailResponse = {
           ...transaction,
           reason: "Transaction timeout",
           jobProgress,
-        });
+        };
+
+        return res.json(body);
       }
     }
 
-    return res.json({ ...transaction, jobProgress });
+    const body: TransactionDetailResponse = {
+      ...transaction,
+      jobProgress,
+    };
+
+    return res.json(body);
   } catch (err) {
     console.error("Failed to fetch transaction:", err);
     return res.status(500).json({ error: "Failed to fetch transaction" });
@@ -360,6 +415,7 @@ export const cancelTransactionHandler = async (req: Request, res: Response) => {
     const transaction = await transactionModel.findById(id);
     if (!transaction) {
       return res.status(404).json({ error: "Transaction not found" });
+    }
 
     if (transaction.status !== TransactionStatus.Pending) {
       return res.status(400).json({
@@ -391,10 +447,12 @@ export const cancelTransactionHandler = async (req: Request, res: Response) => {
       }
     }
 
-    return res.json({
+    const body: CancelTransactionResponse = {
       message: "Transaction cancelled successfully",
       transaction: updatedTransaction,
-    });
+    };
+
+    return res.json(body);
   } catch (err) {
     console.error("Failed to cancel transaction:", err);
     return res.status(500).json({
@@ -468,16 +526,17 @@ export const searchTransactionsHandler = async (
     const { phoneNumber, page = "1", limit = "50" } = req.query;
 
     if (!phoneNumber || typeof phoneNumber !== "string") {
-      return res.status(400).json({ error: "phoneNumber query parameter is required" });
+      return res
+        .status(400)
+        .json({ error: "phoneNumber query parameter is required" });
     }
 
     const sanitized = phoneNumber.trim();
 
-    // Only allow digits with an optional leading +
     if (!/^\+?\d{1,20}$/.test(sanitized)) {
-      return res
-        .status(400)
-        .json({ error: "Invalid phone number format. Use digits only, optional leading +" });
+      return res.status(400).json({
+        error: "Invalid phone number format. Use digits only, optional leading +",
+      });
     }
 
     const pageNum = Math.max(1, parseInt(page as string) || 1);
@@ -490,15 +549,19 @@ export const searchTransactionsHandler = async (
       offset,
     );
 
-    // Mask phone numbers — only expose last 4 digits for privacy
     const masked = transactions.map((tx: any) => ({
       ...tx,
-      phone_number: tx.phone_number
-        ? `****${tx.phone_number.slice(-4)}`
-        : tx.phone_number,
+      phoneNumber:
+        typeof tx.phoneNumber === "string"
+          ? `****${tx.phoneNumber.slice(-4)}`
+          : tx.phoneNumber,
+      phone_number:
+        typeof tx.phone_number === "string"
+          ? `****${tx.phone_number.slice(-4)}`
+          : tx.phone_number,
     }));
 
-    res.json({
+    const body: PhoneSearchResponse = {
       success: true,
       pagination: {
         page: pageNum,
@@ -507,17 +570,15 @@ export const searchTransactionsHandler = async (
         totalPages: Math.ceil(total / limitNum),
       },
       data: masked,
-    });
+    };
+
+    return res.json(body);
   } catch (error) {
     console.error("Phone number search error:", error);
-    res.status(500).json({ error: "Failed to search transactions" });
+    return res.status(500).json({ error: "Failed to search transactions" });
   }
 };
 
-/**
- * List transactions with status filtering and pagination
- * Supports: ?status=pending or ?status=pending,completed&limit=50&offset=0
- */
 export const listTransactionsHandler = async (req: Request, res: Response) => {
   try {
     const filters = (req as any).transactionFilters || {
@@ -526,17 +587,14 @@ export const listTransactionsHandler = async (req: Request, res: Response) => {
       offset: 0,
     };
 
-    // Get total count
     const totalCount = await transactionModel.countByStatuses(filters.statuses);
-
-    // Get paginated transactions
     const transactions = await transactionModel.findByStatuses(
       filters.statuses,
       filters.limit,
       filters.offset,
     );
 
-    res.json({
+    return res.json({
       data: transactions,
       pagination: {
         total: totalCount,
@@ -552,6 +610,6 @@ export const listTransactionsHandler = async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("Failed to list transactions:", err);
-    res.status(500).json({ error: "Failed to list transactions" });
+    return res.status(500).json({ error: "Failed to list transactions" });
   }
 };

@@ -366,8 +366,9 @@ export class TransactionModel {
     );
     const total: number = countResult.rows[0].total;
 
-    const result = await pool.query(
-      `SELECT * FROM transactions
+    const result = await pool.query<Transaction>(
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+       FROM transactions
        WHERE phone_number LIKE $1
        ORDER BY created_at DESC
        LIMIT $2 OFFSET $3`,
@@ -375,5 +376,70 @@ export class TransactionModel {
     );
 
     return { transactions: result.rows, total };
+  }
+
+  async releaseExpiredIdempotencyKey(idempotencyKey: string): Promise<void> {
+    await pool.query(
+      `UPDATE transactions
+       SET idempotency_key = NULL,
+           idempotency_expires_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE idempotency_key = $1
+         AND idempotency_expires_at IS NOT NULL
+         AND idempotency_expires_at <= CURRENT_TIMESTAMP`,
+      [idempotencyKey],
+    );
+  }
+
+  async findActiveByIdempotencyKey(
+    idempotencyKey: string,
+  ): Promise<Transaction | null> {
+    const result = await pool.query<Transaction>(
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+       FROM transactions
+       WHERE idempotency_key = $1
+         AND (
+           idempotency_expires_at IS NULL
+           OR idempotency_expires_at > CURRENT_TIMESTAMP
+         )
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [idempotencyKey],
+    );
+
+    return result.rows[0] || null;
+  }
+
+  async countByStatuses(statuses: TransactionStatus[]): Promise<number> {
+    const validStatuses = statuses.length > 0 ? statuses : Object.values(TransactionStatus);
+    const result = await pool.query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+       FROM transactions
+       WHERE status = ANY($1::text[])`,
+      [validStatuses],
+    );
+
+    return result.rows[0]?.total ?? 0;
+  }
+
+  async findByStatuses(
+    statuses: TransactionStatus[],
+    limit = 50,
+    offset = 0,
+  ): Promise<Transaction[]> {
+    const capped = Math.min(Math.max(limit, 1), 1000);
+    const off = Math.max(offset, 0);
+    const validStatuses = statuses.length > 0 ? statuses : Object.values(TransactionStatus);
+
+    const result = await pool.query<Transaction>(
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+       FROM transactions
+       WHERE status = ANY($1::text[])
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [validStatuses, capped, off],
+    );
+
+    return result.rows;
   }
 }

@@ -49,6 +49,13 @@ A backend service that bridges mobile money providers (MTN, Airtel, Orange) with
 npm run dev
 ```
 
+Add `CORS_MAX_AGE` to your local `.env` to control how long browsers cache CORS
+preflight responses:
+
+```bash
+CORS_MAX_AGE=86400
+```
+
 ### Production
 
 ```bash
@@ -95,6 +102,33 @@ npm run test:coverage
 ```bash
 npm run test:watch
 ```
+
+### Verify CORS Preflight Caching
+
+The API sends `Access-Control-Max-Age` on successful preflight responses so
+browsers can cache them and reduce repeated `OPTIONS` requests. Configure the
+cache duration with:
+
+```bash
+CORS_MAX_AGE=86400
+```
+
+To validate locally, send a preflight request and confirm the response header:
+
+```bash
+curl -i -X OPTIONS http://localhost:3000/health \
+  -H "Origin: https://example.com" \
+  -H "Access-Control-Request-Method: GET"
+```
+
+The response should include:
+
+```text
+Access-Control-Max-Age: 86400
+```
+
+In a browser, the Network tab should show fewer repeated `OPTIONS` requests for
+the same origin, method, and headers until the cache expires.
 
 ### Coverage Requirements
 
