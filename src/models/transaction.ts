@@ -69,6 +69,12 @@ export interface Transaction {
   referenceNumber: string;
   type: "deposit" | "withdraw";
   amount: string;
+  /** ISO 4217 currency code of the original transaction amount (default: USD). */
+  currency?: string;
+  /** Amount in the original currency (mirrors `amount`). */
+  originalAmount?: string;
+  /** Amount converted to the base currency (USD) for uniform aggregation. */
+  convertedAmount?: string;
   phoneNumber: string;
   provider: string;
   stellarAddress: string;
@@ -144,28 +150,17 @@ export class TransactionModel {
     const metadata = validateMetadata(data.metadata);
     const referenceNumber = await generateReferenceNumber();
 
-    const result = await pool.query<Transaction>(
-      `INSERT INTO transactions (
-        reference_number,
-        type,
-        amount,
-        phone_number,
-        provider,
-        stellar_address,
-        status,
-        tags,
-        notes,
-        user_id,
-        idempotency_key,
-        idempotency_expires_at,
-        metadata
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING ${TRANSACTION_SELECT_COLUMNS}`,
+    const result = await pool.query(
+      `INSERT INTO transactions (reference_number, type, amount, currency, original_amount, converted_amount, phone_number, provider, stellar_address, status, tags, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING *`,
       [
         referenceNumber,
         data.type,
-        String(data.amount),
+        data.amount,
+        data.currency ?? "USD",
+        data.originalAmount ?? data.amount,
+        data.convertedAmount ?? null,
         data.phoneNumber,
         data.provider,
         data.stellarAddress,
