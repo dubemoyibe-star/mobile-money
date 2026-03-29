@@ -82,6 +82,23 @@ const checkRateLimit = (
 };
 
 /**
+ * Middleware: for sep24Routes
+ * Limit: 
+ */
+export const sep24RateLimiter = (req: Request, res: Response, next: NextFunction) => {
+  // TODO: This is a STUB and need implmentation
+  const userId = (req as any).user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+ 
+ 
+
+  next();
+};
+
+/**
  * Middleware: Rate limit for export endpoints
  * Limit: 5 exports per hour per admin
  */
