@@ -31,13 +31,14 @@ export const tokenController = {
   },
   // Revoke specific token
   revoke: async (req: Request, res: Response) => {
-    const { familyId } = req.params;
+    const { token_id, family_id } = req.params;
     const userId = (req as any).jwtUser.userId;
 
     try {
       const { data } = await refreshTokenFamilyModel.revokeFamily(
-        familyId,
+        family_id,
         userId,
+        token_id,
       );
 
       // Clear from Redis
