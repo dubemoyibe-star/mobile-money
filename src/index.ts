@@ -10,6 +10,7 @@ import { globalTimeout, haltOnTimedout, timeoutErrorHandler } from './middleware
 import { responseTime } from './middleware/responseTime';
 import { startJobs } from './jobs/startJob';
 import { createQueueDashboard } from './queue';
+import { apiVersionHeader } from './middleware/apiVersion';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,11 +25,13 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json());
 app.use(limiter);
+app.use(apiVersionHeader);
 
 // Global timeout configuration
 app.use(responseTime);
 app.use(globalTimeout);
 app.use(haltOnTimedout);
+
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
