@@ -19,10 +19,12 @@ const MAX_NOTES_LENGTH = 256;
 const TRANSACTION_SELECT_COLUMNS = `
   id,
   reference_number AS "referenceNumber",
+  provider_reference AS "providerReference",
   type,
   amount::text AS amount,
   phone_number AS "phoneNumber",
   provider,
+  provider_reference AS "providerReference",
   stellar_address AS "stellarAddress",
   status,
   COALESCE(tags, '{}') AS tags,
@@ -71,6 +73,7 @@ function validateMetadata(metadata: unknown): Record<string, unknown> {
 export interface Transaction {
   id: string;
   referenceNumber: string;
+  providerReference?: string | null;
   type: "deposit" | "withdraw";
   amount: string;
   /** ISO 4217 currency code of the original transaction amount (default: USD). */
@@ -81,8 +84,13 @@ export interface Transaction {
   convertedAmount?: string;
   phoneNumber: string;
   provider: string;
+providerReference?: string | null;
   stellarAddress: string;
   status: TransactionStatus;
+  // NEW fields
+  assetType: AssetType;
+  assetCode?: string;   // e.g. 'USDC' — only for anchored assets
+  assetIssuer?: string; // issuer address — only for anchored assets
   tags: string[];
   notes?: string;
   adminNotes?: string;
@@ -114,6 +122,7 @@ export interface CreateTransactionInput {
   amount: string | number;
   phoneNumber: string;
   provider: string;
+  providerReference?: string | null;
   stellarAddress: string;
   status: TransactionStatus;
   tags?: string[];
@@ -206,15 +215,16 @@ export class TransactionModel {
 
     const result = await queryWrite(
       `INSERT INTO transactions (
-           reference_number, type, amount, currency, original_amount, 
+           reference_number, provider_reference, type, amount, currency, original_amount, 
            converted_amount, phone_number, provider, stellar_address, 
            status, tags, notes, user_id, idempotency_key, 
            idempotency_expires_at, metadata, location_metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         RETURNING *`,
       [
         referenceNumber,
+        data.providerReference ?? null,
         data.type,
         data.amount,
         data.currency ?? "USD",
@@ -222,6 +232,7 @@ export class TransactionModel {
         data.convertedAmount ?? null,
         encrypt(data.phoneNumber),
         data.provider,
+        data.providerReference ?? null,
         encrypt(data.stellarAddress),
         data.status,
         tags,
@@ -271,6 +282,7 @@ export class TransactionModel {
       minAmount?: number;
       maxAmount?: number;
       provider?: string;
+      providerReference?: string;
       tags?: string[];
     },
   ) {
@@ -301,7 +313,11 @@ export class TransactionModel {
     }
     if (filters?.provider) {
       query += " AND provider = $" + p++;
-      params.push(filters.provider);
+      params.push(filters.provider.toLowerCase());
+    }
+    if (filters?.providerReference) {
+      query += " AND provider_reference = $" + p++;
+      params.push(filters.providerReference);
     }
     if (filters?.tags && filters.tags.length > 0) {
       query += " AND tags @> $" + p++ + "::text[]";
@@ -325,6 +341,7 @@ export class TransactionModel {
       minAmount?: number;
       maxAmount?: number;
       provider?: string;
+      providerReference?: string;
       tags?: string[];
     },
   ): Promise<number> {
@@ -352,7 +369,11 @@ export class TransactionModel {
     }
     if (filters?.provider) {
       query += " AND provider = $" + p++;
-      params.push(filters.provider);
+      params.push(filters.provider.toLowerCase());
+    }
+    if (filters?.providerReference) {
+      query += " AND provider_reference = $" + p++;
+      params.push(filters.providerReference);
     }
     if (filters?.tags && filters.tags.length > 0) {
       query += " AND tags @> $" + p++ + "::text[]";
