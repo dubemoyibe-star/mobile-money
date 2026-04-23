@@ -58,14 +58,15 @@ async function checkRateLimit(
 
     // Use Redis to atomically increment and check
     const count = await redisClient.incr(key);
+    const countNum = typeof count === 'string' ? parseInt(count, 10) : count;
 
     // Set expiry on first request in this window
-    if (count === 1) {
+    if (countNum === 1) {
       await redisClient.pexpire(key, windowMs);
     }
 
-    const allowed = count <= limit;
-    const remaining = Math.max(0, limit - count);
+    const allowed = countNum <= limit;
+    const remaining = Math.max(0, limit - countNum);
 
     return { allowed, remaining, resetTime };
   } catch (error) {
